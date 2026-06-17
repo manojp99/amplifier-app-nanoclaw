@@ -332,6 +332,52 @@ async function main(): Promise<void> {
     return provider;
   }
 
+  // amplifier-agent needs an internal provider (anthropic / openai / azure /
+  // ollama) plus credentials written to .env. This used to be inlined at two
+  // call sites (the cli-agent ping-test setup and the channel setup loop),
+  // which meant users got prompted for the API key twice — once after picking
+  // amplifier-agent and again after picking a channel like Telegram. Memoize
+  // the same way `resolveProvider` / `resolveDisplayName` do, with an explicit
+  // "resolved" flag because `askAmplifierAgentCredentials` can legitimately
+  // return undefined (user hit Enter on an empty prompt) and we must not
+  // treat that as "not yet asked".
+  let amplifierCredsResolved = false;
+  async function resolveAmplifierCreds(): Promise<void> {
+    if (amplifierCredsResolved) return;
+    if (provider !== 'amplifier-agent') {
+      amplifierCredsResolved = true;
+      return;
+    }
+    const internalProvider = await askAmplifierAgentInternalProvider();
+    const credentials = await askAmplifierAgentCredentials(internalProvider);
+    amplifierCredsResolved = true;
+
+    if (credentials && Object.keys(credentials.envVars).length > 0) {
+      for (const [key, value] of Object.entries(credentials.envVars)) {
+        writeEnvLine(key, value);
+      }
+      writeEnvLine('NANOCLAW_DEFAULT_PROVIDER', 'amplifier-agent');
+      writeEnvLine('AMPLIFIER_AGENT_INTERNAL_PROVIDER', internalProvider);
+      p.log.message(
+        brandBody(
+          wrapForGutter(
+            `✓ Credentials written to .env for ${internalProvider}`,
+            4,
+          ),
+        ),
+      );
+    } else {
+      p.log.warn(
+        brandBody(
+          wrapForGutter(
+            `No credentials provided. You'll need to manually add the required environment variables to .env before the agent can run.`,
+            4,
+          ),
+        ),
+      );
+    }
+  }
+
   if (!skip.has('cli-agent') && detectRegisteredGroups(process.cwd())) {
     skip.add('cli-agent');
     skip.add('first-chat');
@@ -340,40 +386,7 @@ async function main(): Promise<void> {
   if (!skip.has('cli-agent')) {
     await resolveDisplayName();
     await resolveProvider();
-
-    // If using amplifier-agent, prompt for internal provider and credentials
-    if (provider === 'amplifier-agent') {
-      const internalProvider = await askAmplifierAgentInternalProvider();
-      const credentials = await askAmplifierAgentCredentials(internalProvider);
-
-      if (credentials && Object.keys(credentials.envVars).length > 0) {
-        // Write all env vars for this provider
-        for (const [key, value] of Object.entries(credentials.envVars)) {
-          writeEnvLine(key, value);
-        }
-        // Set as default provider for all future agents (channels)
-        writeEnvLine('NANOCLAW_DEFAULT_PROVIDER', 'amplifier-agent');
-        // Store which internal provider was selected
-        writeEnvLine('AMPLIFIER_AGENT_INTERNAL_PROVIDER', internalProvider);
-        p.log.message(
-          brandBody(
-            wrapForGutter(
-              `✓ Credentials written to .env for ${internalProvider}`,
-              4,
-            ),
-          ),
-        );
-      } else {
-        p.log.warn(
-          brandBody(
-            wrapForGutter(
-              `No credentials provided. You'll need to manually add the required environment variables to .env before the agent can run.`,
-              4,
-            ),
-          ),
-        );
-      }
-    }
+    await resolveAmplifierCreds();
 
     const args = ['--display-name', displayName!, '--agent-name', CLI_AGENT_NAME, '--folder', '_ping-test'];
     if (provider !== 'claude') {
@@ -505,34 +518,9 @@ async function main(): Promise<void> {
         await resolveDisplayName();
         // Ask for provider selection for new channels
         await resolveProvider();
-        if (provider === 'amplifier-agent') {
-          const internalProvider = await askAmplifierAgentInternalProvider();
-          const credentials = await askAmplifierAgentCredentials(internalProvider);
-          if (credentials && Object.keys(credentials.envVars).length > 0) {
-            for (const [key, value] of Object.entries(credentials.envVars)) {
-              writeEnvLine(key, value);
-            }
-            writeEnvLine('NANOCLAW_DEFAULT_PROVIDER', 'amplifier-agent');
-            writeEnvLine('AMPLIFIER_AGENT_INTERNAL_PROVIDER', internalProvider);
-            p.log.message(
-              brandBody(
-                wrapForGutter(
-                  `✓ Credentials written to .env for ${internalProvider}`,
-                  4,
-                ),
-              ),
-            );
-          } else {
-            p.log.warn(
-              brandBody(
-                wrapForGutter(
-                  `No credentials provided. You'll need to manually add the required environment variables to .env before the agent can run.`,
-                  4,
-                ),
-              ),
-            );
-          }
-        }
+        // No-op if we already asked during the cli-agent step or if the
+        // chosen provider isn't amplifier-agent. See resolveAmplifierCreds.
+        await resolveAmplifierCreds();
       }
       let result: void | typeof BACK_TO_CHANNEL_SELECTION;
       if (channelChoice === 'telegram') {
